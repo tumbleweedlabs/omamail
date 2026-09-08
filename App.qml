@@ -1679,7 +1679,6 @@ Item {
           sentColor: mailPalette.sent
           draftColor: mailPalette.drafts
           labelColor: mailPalette.labels
-          calendarColor: mailPalette.calendar
           dangerColor: mailPalette.danger
           scrollSpeedMultiplier: root.scrollSpeedMultiplier
           showTrailingSeparator: root.sidebarCollapsed || root.calendarVisible
@@ -1687,10 +1686,6 @@ Item {
           slots: root.sidebarSlots
           numbersVisible: focusScope.ctrlHeld
           onMailboxSelected: function(key) { root.goMailbox(key) }
-          onCalendarRequested: {
-            root.showCalendar()
-            calendarView.refresh()
-          }
           // Not a search: the provider decides what selecting a label means,
           // and on IMAP it is a folder rather than a term to look for.
           onLabelSelected: function(labelId, name) {
@@ -2433,7 +2428,8 @@ Item {
           accentColor: root.accent
           panelFontFamily: root.fontFamily
           hints: Keymap.hintsFor(focusScope.keyContext,
-            root.service ? root.service.unavailableActions : [])
+            root.service ? root.service.unavailableActions : [],
+            root.cursorId !== "")
         }
       }
 
