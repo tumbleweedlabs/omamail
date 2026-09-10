@@ -125,7 +125,7 @@ grep -q 'remoteImageData: remoteImagesAllowed ? remoteImageData : null' account/
   || fail "Qt must receive prepared image bytes rather than a pending remote source"
 grep -q 'command: \["python3", pluginDir + "/scripts/image-fetch.py"\]' account/MailAccount.qml \
   || fail "remote images must use the public-IP-checked Python transport"
-grep -q 'command: \["python3", pluginDir + "/scripts/unsubscribe.py"\]' account/MailAccount.qml \
+grep -q 'command: \["python3", account.pluginDir + "/scripts/unsubscribe.py"\]' account/Unsubscribe.qml \
   || fail "one-click unsubscribe must use the public-IP-checked Python transport"
 # Redirect and DNS policy require behavioral tests, not a matching config line.
 
@@ -673,7 +673,12 @@ grep -q 'streamedSummaryBatch' providers/ImapClient.qml \
   || fail "streamed IMAP results must fetch headers in visible batches"
 grep -q 'fetchQueue\.push(wanted)' account/MailAccount.qml \
   || fail "streamed metadata reads need one shared queue"
-grep -q 'if (index >= 0 && listLoading)' account/MailAccount.qml \
+awk '
+  /function act\(/ { in_act = 1 }
+  in_act && /^    stopLiveList\(\)/ { stopped = 1 }
+  in_act && /if \(removed\) messages = Model\.removeById\(messages, rowId\)/ { exit !stopped }
+  END { exit !stopped }
+' account/MailAccount.qml \
   || fail "an action must stop a live list before stale snapshots can settle"
 grep -q 'pendingAction !== "" && cacheKey === pendingActionQuery' account/MailAccount.qml \
   || fail "an action may only suppress refreshes for its own query"
@@ -683,11 +688,11 @@ grep -q 'resumeDeferredListLoad(actionQuery' account/MailAccount.qml \
   || fail "an action callback must resume a deferred navigation load"
 awk '
   /function act\(/ { in_act = 1 }
-  in_act && /if \(pendingAction !== ""\)/ { guarded = 1 }
-  in_act && /pendingAction = action/ { exit !guarded }
-  END { exit !guarded }
+  in_act && /function dispatch\(\)/ { in_dispatch = 1 }
+  in_act && /pendingAction = action/ { exit !in_dispatch }
+  END { exit !in_dispatch }
 ' account/MailAccount.qml \
-  || fail "a second row action must not overwrite the pending action slot"
+  || fail "only the send may take the pending action slot; a queued action must not"
 awk '
   /function markAllRead\(\)/ { in_mark_all = 1 }
   in_mark_all && /if \(pendingAction !== ""\)/ { guarded = 1 }
@@ -711,20 +716,18 @@ grep -q 'var invalidatesPage = !survives || opaqueQuery' account/MailAccount.qml
   || fail "paging membership must not follow the reader's keep-open decision"
 grep -q 'if (!service.act(acted, action)) return false' App.qml \
   || fail "a refused action must not move the keyboard cursor"
-grep -q 'queueAction(messageId, action, cacheKey, quiet === true, oneMessage)' account/MailAccount.qml \
-  || fail "automatic mark-read must wait rather than disappear behind another action"
 # Clearing a mailbox means pressing the same key down a list faster than any
 # server answers. Refusing the second press dropped it: the message stayed, the
 # note blamed the user for a failure they had not caused, and the false return
-# held the keyboard cursor on a row the user had already left behind.
+# held the keyboard cursor on a row the user had already left behind. Queueing
+# the whole action was not enough either: the row moves at the keystroke.
 awk '
   /function act\(/ { in_act = 1 }
-  in_act && /if \(pendingAction !== ""\)/ { in_guard = 1 }
-  in_guard && /queueAction\(messageId, action, cacheKey, quiet === true, oneMessage\)/ { queues = 1 }
-  in_guard && /return true/ { exit !queues }
-  END { exit !queues }
+  in_act && /if \(removed\) messages = Model\.removeById\(messages, rowId\)/ { moved = 1 }
+  in_act && /if \(slotTaken\) queueAction\(messageId, action, actionQuery, quiet === true, oneMessage, dispatch, discard\)/ { exit !moved }
+  END { exit !moved }
 ' account/MailAccount.qml \
-  || fail "an action taken while one is pending must queue rather than be refused"
+  || fail "an action taken while one is pending must move its row before its send waits"
 # Scoped to `act`. `markAllRead` still refuses on purpose: it reads the unread
 # set at the moment it runs, so one queued behind a mutation would send a list
 # the mailbox had already moved past.
@@ -735,34 +738,71 @@ awk '
   END { exit refuses }
 ' account/MailAccount.qml \
   || fail "a queued action must not report a failure the user did not cause"
-# The reader keeps a quiet row that the same explicit action would evict, so the
-# flag has to survive the wait. Draining every request as quiet would leave a
-# trashed message on screen under the reader that deleted it.
+# A queued request is a send, not a verb to run through `act` again: its row
+# has already left.
 awk '
   /function runQueuedAction\(\)/ { in_queued = 1 }
-  in_queued && /act\(request\.id, request\.action, request\.quiet, request\.memberOnly\)/ { forwards = 1 }
-  /function refuseUnavailableAction\(/ { exit !forwards }
-  END { exit !forwards }
+  in_queued && /request\.dispatch\(\)/ { dispatches = 1 }
+  /function refuseUnavailableAction\(/ { exit !dispatches }
+  END { exit !dispatches }
 ' account/MailAccount.qml \
-  || fail "a queued action must run with the quietness it was taken with"
+  || fail "a queued action must run the send it was taken with"
+grep -q 'dispatch: previous.dispatch' account/Model.js \
+  || fail "coalescing a repeated action must keep the send that carries its rollback"
+# A queued send runs inside the callback that freed the slot, which may just
+# have resumed this query's list.
 awk '
-  /function runQueuedAction\(\)/ { in_quiet = 1 }
-  in_quiet && /listSerial\+\+/ { interrupts = 1 }
-  in_quiet && /root\.loadMessages\(false, true/ { reloads = 1 }
-  /function act\(/ { exit !(interrupts && reloads) }
-  END { exit !(interrupts && reloads) }
+  /function dispatch\(\)/ { in_dispatch = 1 }
+  in_dispatch && /stopLiveList\(\)/ { interrupts = 1 }
+  in_dispatch && /if \(slotTaken\)/ { exit !interrupts }
+  END { exit !interrupts }
 ' account/MailAccount.qml \
-  || fail "a detached quiet action must stop and revalidate its query stream"
+  || fail "a queued send must stop a live list before stale snapshots can settle"
+# The slot is retaken before the freeing answer is acted on, so no reload
+# settles a state the next edit is not in yet.
+awk '
+  /function act\(/ { in_act = 1 }
+  in_act && /var done = function/ { in_done = 1 }
+  in_done && /root\.runQueuedAction\(\)/ { drains = 1 }
+  in_done && /resumeDeferredListLoad\(actionQuery/ { exit !drains }
+  END { exit !drains }
+' account/MailAccount.qml \
+  || fail "an action callback must send the next queued action before it revalidates"
 test "$(grep -c 'root.active && root.cacheKey !== actionQuery' account/MailAccount.qml)" -ge 2 \
   || fail "successful actions must revalidate a mailbox opened while they were pending"
 awk '
-  /function markAllRead\(\)/ { in_mark_all = 1 }
-  in_mark_all && /if \(interrupted\)/ { saw_interrupt = 1 }
-  in_mark_all && /root\.loadMessages\(false, true, error\)/ { saw_retry = 1 }
-  in_mark_all && /^  }/ { exit !(saw_interrupt && saw_retry) }
+  /function run\(/ { in_bulk = 1 }
+  in_bulk && /^    stopLiveList\(\)/ { saw_interrupt = 1 }
+  in_bulk && /account\.loadMessages\(false, true, note\)/ { saw_retry = 1 }
+  in_bulk && /^  }/ { exit !(saw_interrupt && saw_retry) }
   END { exit !(saw_interrupt && saw_retry) }
-' account/MailAccount.qml \
-  || fail "mark-all must stop and revalidate a live list too"
+' account/BatchAction.qml \
+  || fail "a bulk action must stop and revalidate a live list too"
+# The batch is one more producer on the same queue and one more completion
+# that drains it: taken while a send holds the slot it moves its rows now and
+# queues its own send; answered, it sends the next queued action before it
+# acts on its answer, so an action taken behind it is never left waiting.
+grep -q 'if (slotTaken) account.queueAction(listed.join(","), action, actionQuery, false, false, dispatch, discard)' account/BatchAction.qml \
+  || fail "a batch taken while a send holds the slot must queue its send, not run through act"
+awk '
+  /var done = function/ { in_done = 1 }
+  in_done && /account\.runQueuedAction\(\)/ { drains = 1 }
+  in_done && /if \(error\)/ { exit !drains }
+  END { exit !drains }
+' account/BatchAction.qml \
+  || fail "a batch callback must send the next queued action before it acts on its answer"
+# A refused bulk edit comes off row by row through the same intents a single
+# edit holds, never as a snapshot of the list put back over the edits taken
+# behind it: a star pressed while mark-all was still deciding stays.
+for bulk in account/MailAccount.qml account/BatchAction.qml; do
+  grep -q 'intents\.restore(edits\[e\], lists)' "$bulk" \
+    || fail "$bulk must settle a refused bulk edit through its intents"
+done
+if awk '/function markAllRead\(\)/ { in_mark_all = 1 } in_mark_all && /root\.messages = before/ { found = 1 } END { exit !found }' account/MailAccount.qml; then
+  fail "mark-all must not put a snapshot of the list back over later edits"
+fi
+grep -q 'return batchAction.run(ids, action)' account/MailAccount.qml \
+  || fail "the account must hand its batch to BatchAction"
 grep -q 'root\.loadMessages(false, true, error)' account/MailAccount.qml \
   || fail "a failed action must resume the list without losing its error"
 grep -q 'root\.loadMessages(false, true, "")' account/MailAccount.qml \
@@ -1076,19 +1116,23 @@ awk '
 #    a release asset, or GitHub's own attachment host, which is where the
 #    README's screenshots already live.
 #
-#    preview.png is the one exception, and it is named rather than waved
-#    through by raising the ceiling. The marketplace catalog rebuilds from
+#    preview.png is the asset exception, and it is named rather than waved
+#    through by raising the ceiling. App.qml has its own narrow source ceiling
+#    because the integrated window now exceeds the generic asset-oriented cap.
+#    The marketplace catalog rebuilds from
 #    branch HEAD and takes a plugin's card image from a root file, so this one
 #    has to be in the tree or the card falls back to a placeholder. It gets a
 #    ceiling of its own instead of none: a card image that grew to a megabyte
 #    would still be a megabyte every user clones.
 limit=$((128 * 1024))
 preview_limit=$((384 * 1024))
+app_limit=$((144 * 1024))
 oversized=$(git ls-files -z \
   | xargs -0 -I{} sh -c '
       [ -f "{}" ] || exit 0
       case "{}" in
         preview.png) ceiling='"$preview_limit"' ;;
+        App.qml) ceiling='"$app_limit"' ;;
         *) ceiling='"$limit"' ;;
       esac
       size=$(wc -c < "{}" 2>/dev/null || echo 0)

@@ -55,6 +55,15 @@ Item {
   signal composeRequested(string mode)
   signal mailtoRequested(string url)
   signal actionRequested(string action)
+  signal agentRequested(real sceneX, real sceneY)
+  // A right-click on the From line or the To line: the addresses on it, and
+  // where the menu goes. What is done with them is the window's decision.
+  signal addressMenuRequested(var addresses, real sceneX, real sceneY)
+  // Whether the agent popup is up for this message, and whether a job is
+  // running on it — passed down like every other fact the reader draws.
+  property bool agentOpen: false
+  property bool agentWorking: false
+  property bool agentAttention: false
 
   Rectangle {
     anchors.fill: parent
@@ -320,7 +329,7 @@ Item {
         : root.dimColor
       hoverColor: root.systemThemeStyling ? root.starColor : root.accentColor
       fontFamily: root.panelFontFamily
-      onClicked: if (root.service && root.summary) root.service.toggleStar(root.selectedId)
+      onClicked: if (root.service && root.summary) root.actionRequested("star")
     }
 
     Column {
@@ -348,6 +357,7 @@ Item {
       }
 
       Text {
+        id: fromLine
         width: parent.width
         textFormat: Text.PlainText
         text: root.summary
@@ -358,9 +368,20 @@ Item {
         font.pixelSize: Style.font.bodySmall
         elide: Text.ElideRight
         horizontalAlignment: root.headerAlignment
+
+        TapHandler {
+          acceptedButtons: Qt.RightButton
+          onTapped: function(eventPoint) {
+            var scene = fromLine.mapToGlobal(eventPoint.position.x, eventPoint.position.y)
+            root.addressMenuRequested(root.summary ? [root.summary.from] : [], scene.x, scene.y)
+          }
+        }
       }
 
+      // Everyone the message went to — To, Cc and Bcc, which a sent message
+      // carries — so a right-click on the line can name any of them.
       Text {
+        id: toLine
         width: parent.width
         textFormat: Text.PlainText
         text: root.summary
@@ -371,6 +392,16 @@ Item {
         font.pixelSize: Style.font.caption
         elide: Text.ElideRight
         horizontalAlignment: root.headerAlignment
+
+        TapHandler {
+          acceptedButtons: Qt.RightButton
+          onTapped: function(eventPoint) {
+            if (!root.summary) return
+            var all = (root.summary.to || []).concat(root.summary.cc || [], root.summary.bcc || [])
+            var scene = toLine.mapToGlobal(eventPoint.position.x, eventPoint.position.y)
+            root.addressMenuRequested(all, scene.x, scene.y)
+          }
+        }
       }
     }
   }
